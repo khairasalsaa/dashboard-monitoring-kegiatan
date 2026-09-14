@@ -603,102 +603,6 @@ def render_interactive_dashboard(df_base):
         """, unsafe_allow_html=True)
 
     # ==========================================================================
-    # KOMPOSISI 5 KATEGORI GROUP BUDGET (ALL BL) - PIE CHART BUDGET ONLY
-    # ==========================================================================
-    # Pie chart hanya menunjukkan KOMPOSISI TOTAL BUDGET.
-    # Tidak menggunakan realisasi maupun % serapan dalam perhitungan/tooltip.
-    # Sumber kategori berasal dari seluruh BL (ALL BL), bukan hanya 17 BL Kegiatan.
-    if "group_budget" in df_all_filtered.columns:
-        kategori_utama = ["SDM", "Kegiatan", "Aset", "Operasional", "Performance Based"]
-
-        df_gb_budget = (
-            df_all_filtered[df_all_filtered["group_budget"].isin(kategori_utama)]
-            .groupby("group_budget", as_index=False)
-            .agg(budget=("total_budget_valid", "sum"))
-        )
-
-        # Pastikan 5 kategori tetap tersedia walaupun salah satu bernilai 0.
-        df_gb_budget = (
-            pd.DataFrame({"group_budget": kategori_utama})
-            .merge(df_gb_budget, on="group_budget", how="left")
-            .fillna({"budget": 0})
-        )
-
-        st.subheader("Komposisi Budget berdasarkan 5 Kategori BL")
-        st.caption("Pie chart menunjukkan proporsi total budget ALL BL untuk kategori SDM, Kegiatan, Aset, Operasional, dan Performance Based.")
-
-        fig_gb_pie = px.pie(
-            df_gb_budget,
-            names="group_budget",
-            values="budget",
-            hole=0.38,
-            title="Proporsi Total Budget per Kategori"
-        )
-        # Buat semua kategori tetap terbaca, termasuk kategori dengan proporsi sangat kecil seperti Aset
-        total_budget_pie = df_gb_budget["budget"].sum()
-        df_gb_budget["persen"] = np.where(
-            total_budget_pie > 0,
-            df_gb_budget["budget"] / total_budget_pie * 100,
-            0
-        )
-
-        # Susun custom label: kategori kecil tetap punya label di luar donut
-        custom_text = [
-            f"{row['group_budget']}<br>{row['persen']:.2f}%"
-            for _, row in df_gb_budget.iterrows()
-        ]
-
-        fig_gb_pie = px.pie(
-            df_gb_budget,
-            names="group_budget",
-            values="budget",
-            hole=0.48,
-            title="Proporsi Total Budget per Kategori"
-        )
-        fig_gb_pie.update_traces(
-            text=custom_text,
-            textinfo="text",
-            textposition="outside",
-            pull=[0.00, 0.00, 0.08, 0.00, 0.00],
-            automargin=True,
-            hovertemplate=(
-                "<b>%{label}</b><br>"
-                "Budget: Rp %{value:,.0f}<br>"
-                "Proporsi: %{percent}<extra></extra>"
-            )
-        )
-        fig_gb_pie.update_layout(
-            height=460,
-            margin=dict(l=90, r=160, t=65, b=55),
-            uniformtext_minsize=10,
-            uniformtext_mode="show",
-            legend=dict(
-                orientation="v",
-                yanchor="middle",
-                y=0.5,
-                xanchor="left",
-                x=1.02
-            )
-        )
-        st.plotly_chart(fig_gb_pie, use_container_width=True)
-
-        # Ringkasan nominal membantu memastikan seluruh 5 kategori terlihat meski slice sangat kecil
-        df_gb_show = df_gb_budget.copy()
-        df_gb_show["Proporsi"] = df_gb_show["persen"]
-        df_gb_show = df_gb_show[["group_budget", "budget", "Proporsi"]]
-        df_gb_show.columns = ["Kategori", "Total Budget (Rp)", "Proporsi"]
-        st.dataframe(
-            df_gb_show.style.format({
-                "Total Budget (Rp)": "Rp {:,.0f}",
-                "Proporsi": "{:.2f}%"
-            }),
-            use_container_width=True,
-            hide_index=True
-        )
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # ==========================================================================
     # 2. DETAIL BUDGET VS SERAPAN PER BULAN
     # ==========================================================================
     st.subheader("Detail Budget vs Serapan per Bulan")
@@ -820,7 +724,173 @@ def render_interactive_dashboard(df_base):
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ==========================================================================
-    # 4. SEGMENTASI KINERJA SSR DENGAN K-MEANS CLUSTERING (MACHINE LEARNING)
+    # 4. PERSENTASE SERAPAN BL KEGIATAN PER SSR (17 BL KEGIATAN - ALL SSR)
+    # ==========================================================================
+    # Menampilkan SELURUH SSR (bukan Top 10) berdasarkan persentase serapan dana
+    # khusus 17 BL Kegiatan. Tetap mengikuti filter Bulan dan SSR dari sidebar.
+    kegiatan_17_bl = [36, 37, 38, 39, 40, 49, 54, 55, 56, 61, 62, 68, 69, 74, 78, 80, 154]
+
+    df_serapan_kegiatan = df_base[
+        (df_base["bulan_nama"].isin(selected_months)) &
+        (df_base["ssr"].isin(selected_ssr)) &
+        (df_base["bl"].isin(kegiatan_17_bl))
+    ].copy()
+
+    df_serapan_kegiatan_ssr = (
+        df_serapan_kegiatan
+        .groupby("ssr", as_index=False)
+        .agg(
+            total_budget_kegiatan=("total_budget_valid", "sum"),
+            total_realisasi_kegiatan=("realisasi", "sum")
+        )
+    )
+
+    df_serapan_kegiatan_ssr["% Serapan Kegiatan"] = np.where(
+        df_serapan_kegiatan_ssr["total_budget_kegiatan"] > 0,
+        df_serapan_kegiatan_ssr["total_realisasi_kegiatan"] / df_serapan_kegiatan_ssr["total_budget_kegiatan"] * 100,
+        0
+    )
+
+    # Urutkan dari serapan tertinggi ke terendah, tetapi TIDAK dipotong Top 10.
+    df_serapan_kegiatan_ssr = df_serapan_kegiatan_ssr.sort_values(
+        "% Serapan Kegiatan", ascending=False
+    ).reset_index(drop=True)
+
+    st.subheader("Persentase Serapan BL Kegiatan per SSR")
+    st.caption("Sumbu X = seluruh SSR | Sumbu Y = % Serapan Kegiatan | Sumber = 17 BL Kegiatan only (tanpa Top 10).")
+
+    fig_serapan_kegiatan = go.Figure()
+    fig_serapan_kegiatan.add_trace(go.Bar(
+        x=df_serapan_kegiatan_ssr["ssr"],
+        y=df_serapan_kegiatan_ssr["% Serapan Kegiatan"],
+        marker_color="#3b82f6",
+        text=df_serapan_kegiatan_ssr["% Serapan Kegiatan"].map(lambda x: f"{x:.2f}%"),
+        textposition="outside",
+        cliponaxis=False,
+        customdata=np.stack((
+            df_serapan_kegiatan_ssr["total_realisasi_kegiatan"],
+            df_serapan_kegiatan_ssr["total_budget_kegiatan"]
+        ), axis=-1),
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "Serapan Kegiatan: %{y:.2f}%<br>"
+            "Realisasi: Rp %{customdata[0]:,.0f}<br>"
+            "Budget: Rp %{customdata[1]:,.0f}<extra></extra>"
+        )
+    ))
+    y_max_serapan = df_serapan_kegiatan_ssr["% Serapan Kegiatan"].max() if not df_serapan_kegiatan_ssr.empty else 100
+    fig_serapan_kegiatan.update_layout(
+        title="Persentase Serapan Kegiatan Seluruh SSR",
+        xaxis_title="SSR",
+        yaxis_title="% Serapan Kegiatan",
+        yaxis=dict(range=[0, max(110, y_max_serapan * 1.15)], ticksuffix="%"),
+        xaxis=dict(tickangle=-35),
+        height=430,
+        margin=dict(l=20, r=20, t=55, b=90),
+        showlegend=False
+    )
+    st.plotly_chart(fig_serapan_kegiatan, use_container_width=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ==========================================================================
+    # 5. KOMPOSISI 5 KATEGORI GROUP BUDGET (ALL BL) - DONUT CHART BUDGET ONLY
+    # ==========================================================================
+    # Pie chart hanya menunjukkan KOMPOSISI TOTAL BUDGET.
+    # Tidak menggunakan realisasi maupun % serapan dalam perhitungan/tooltip.
+    # Sumber kategori berasal dari seluruh BL (ALL BL), bukan hanya 17 BL Kegiatan.
+    if "group_budget" in df_all_filtered.columns:
+        kategori_utama = ["SDM", "Kegiatan", "Aset", "Operasional", "Performance Based"]
+
+        df_gb_budget = (
+            df_all_filtered[df_all_filtered["group_budget"].isin(kategori_utama)]
+            .groupby("group_budget", as_index=False)
+            .agg(budget=("total_budget_valid", "sum"))
+        )
+
+        # Pastikan 5 kategori tetap tersedia walaupun salah satu bernilai 0.
+        df_gb_budget = (
+            pd.DataFrame({"group_budget": kategori_utama})
+            .merge(df_gb_budget, on="group_budget", how="left")
+            .fillna({"budget": 0})
+        )
+
+        st.subheader("Komposisi Budget berdasarkan 5 Kategori BL")
+        st.caption("Pie chart menunjukkan proporsi total budget ALL BL untuk kategori SDM, Kegiatan, Aset, Operasional, dan Performance Based.")
+
+        fig_gb_pie = px.pie(
+            df_gb_budget,
+            names="group_budget",
+            values="budget",
+            hole=0.38,
+            title="Proporsi Total Budget per Kategori"
+        )
+        # Buat semua kategori tetap terbaca, termasuk kategori dengan proporsi sangat kecil seperti Aset
+        total_budget_pie = df_gb_budget["budget"].sum()
+        df_gb_budget["persen"] = np.where(
+            total_budget_pie > 0,
+            df_gb_budget["budget"] / total_budget_pie * 100,
+            0
+        )
+
+        # Susun custom label: kategori kecil tetap punya label di luar donut
+        custom_text = [
+            f"{row['group_budget']}<br>{row['persen']:.2f}%"
+            for _, row in df_gb_budget.iterrows()
+        ]
+
+        fig_gb_pie = px.pie(
+            df_gb_budget,
+            names="group_budget",
+            values="budget",
+            hole=0.48,
+            title="Proporsi Total Budget per Kategori"
+        )
+        fig_gb_pie.update_traces(
+            text=custom_text,
+            textinfo="text",
+            textposition="outside",
+            pull=[0.00, 0.00, 0.08, 0.00, 0.00],
+            automargin=True,
+            hovertemplate=(
+                "<b>%{label}</b><br>"
+                "Budget: Rp %{value:,.0f}<br>"
+                "Proporsi: %{percent}<extra></extra>"
+            )
+        )
+        fig_gb_pie.update_layout(
+            height=460,
+            margin=dict(l=90, r=160, t=65, b=55),
+            uniformtext_minsize=10,
+            uniformtext_mode="show",
+            legend=dict(
+                orientation="v",
+                yanchor="middle",
+                y=0.5,
+                xanchor="left",
+                x=1.02
+            )
+        )
+        st.plotly_chart(fig_gb_pie, use_container_width=True)
+
+        # Ringkasan nominal membantu memastikan seluruh 5 kategori terlihat meski slice sangat kecil
+        df_gb_show = df_gb_budget.copy()
+        df_gb_show["Proporsi"] = df_gb_show["persen"]
+        df_gb_show = df_gb_show[["group_budget", "budget", "Proporsi"]]
+        df_gb_show.columns = ["Kategori", "Total Budget (Rp)", "Proporsi"]
+        st.dataframe(
+            df_gb_show.style.format({
+                "Total Budget (Rp)": "Rp {:,.0f}",
+                "Proporsi": "{:.2f}%"
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ==========================================================================
+    # 6. SEGMENTASI KINERJA SSR DENGAN K-MEANS CLUSTERING (MACHINE LEARNING)
     # ==========================================================================
     st.subheader("Segmentasi Kinerja Lembaga (K-Means Clustering)")
     # K-Means khusus 17 BL Kegiatan, tetap mengikuti filter Bulan & SSR.
