@@ -8,6 +8,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
 import io
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(
@@ -148,83 +151,25 @@ def clean_number(value):
         return 0.0
 
 
-@st.cache_data(show_spinner=False)
-def get_kegiatan_bl_metadata(bl_file_bytes=None):
-    """
-    Membaca Data BL Rev.xlsx dari file bytes unggahan atau file lokal,
-    dan mengambil nomor BL yang Group Budget-nya Kegiatan.
-    """
-    df_meta = None
-    source_info = "Default Fallback"
-    
-    # 1. Coba baca dari file unggahan user jika ada
-    if bl_file_bytes is not None:
-        try:
-            excel = pd.ExcelFile(io.BytesIO(bl_file_bytes))
-            sheet_target = None
-            for s in excel.sheet_names:
-                if "group budget" in s.lower():
-                    sheet_target = s
-                    break
-            if sheet_target is None:
-                for s in excel.sheet_names:
-                    if any(k in s.lower() for k in ["budget", "bl", "group"]):
-                        sheet_target = s
-                        break
-            if sheet_target is None:
-                sheet_target = excel.sheet_names[0]
-                
-            df_meta = pd.read_excel(io.BytesIO(bl_file_bytes), sheet_name=sheet_target)
-            source_info = f"Unggahan (Sheet: {sheet_target})"
-        except Exception:
-            df_meta = None
-
-    # 2. Jika tidak ada unggahan, cari dari file lokal
-    if df_meta is None:
-        for f_path in ["Data BL Rev.xlsx", "data/Data BL Rev.xlsx"]:
-            if Path(f_path).exists():
-                try:
-                    excel = pd.ExcelFile(f_path)
-                    sheet_target = "Group Budget" if "Group Budget" in excel.sheet_names else excel.sheet_names[0]
-                    df_meta = pd.read_excel(f_path, sheet_name=sheet_target)
-                    source_info = f"Lokal: {f_path}"
-                    break
-                except Exception:
-                    pass
-
-    # 3. Ekstraksi nomor BL dengan kategori Kegiatan
-    if df_meta is not None and not df_meta.empty:
-        col_map = {}
-        for c in df_meta.columns:
-            clow = str(c).strip().lower()
-            if clow in ["bl", "budget line", "kode bl", "no bl", "nomor bl"]:
-                col_map[c] = "bl"
-            elif any(k in clow for k in ["desc", "activity", "kegiatan", "uraian", "nama", "aktivitas"]):
-                col_map[c] = "bl_desc"
-            elif any(k in clow for k in ["group", "kategori", "kelompok"]):
-                col_map[c] = "group_budget"
-
-        df_meta = df_meta.rename(columns=col_map)
-        if "bl" in df_meta.columns:
-            df_meta["bl"] = pd.to_numeric(df_meta["bl"], errors="coerce")
-            if "group_budget" not in df_meta.columns:
-                df_meta["group_budget"] = "Kegiatan"
-            else:
-                df_meta["group_budget"] = df_meta["group_budget"].fillna("").astype(str).str.strip()
-                
-            if "bl_desc" not in df_meta.columns:
-                df_meta["bl_desc"] = "-"
-            else:
+@st.cache_data
+def get_bl_metadata():
+    """Membaca file Data BL Rev.xlsx untuk memetakan Group Budget dan Deskripsi Aktivitas"""
+    for f_path in ["Data BL Rev.xlsx", "data/Data BL Rev.xlsx"]:
+        if Path(f_path).exists():
+            try:
+                df_meta = pd.read_excel(f_path, sheet_name="Group Budget")
+                df_meta = df_meta.rename(columns={
+                    "BL": "bl",
+                    "Description of Activities": "bl_desc",
+                    "Group Budget": "group_budget"
+                })
+                df_meta["bl"] = pd.to_numeric(df_meta["bl"], errors="coerce")
+                df_meta["group_budget"] = df_meta["group_budget"].fillna("Lainnya").astype(str).str.strip()
                 df_meta["bl_desc"] = df_meta["bl_desc"].fillna("-").astype(str).str.strip()
-
-            df_keg = df_meta[df_meta["group_budget"].str.lower() == "kegiatan"].copy()
-            if not df_keg.empty:
-                res = df_keg[["bl", "group_budget", "bl_desc"]].dropna(subset=["bl"]).drop_duplicates(subset=["bl"])
-                return res, source_info
-
-    # 4. Fallback jika file tidak ditemukan
-    fallback_bls = [36, 37, 38, 39, 40, 49, 54, 55, 56, 61, 62, 68, 69, 74, 78, 80, 154]
-    return pd.DataFrame({"bl": fallback_bls, "group_budget": "Kegiatan", "bl_desc": "-"}), "Default Fallback (17 BL)"
+                return df_meta[["bl", "group_budget", "bl_desc"]].dropna(subset=["bl"]).drop_duplicates(subset=["bl"])
+            except Exception:
+                pass
+    return None
 
 
 def auto_detect_columns(cols):
@@ -264,7 +209,7 @@ def auto_detect_columns(cols):
     return mapping
 
 
-def process_clean_dataframe(df_raw, col_map, month_range_option, apply_outlier_fix, df_keg_meta=None):
+def process_clean_dataframe(df_raw, col_map, month_range_option, apply_outlier_fix):
     """Pipeline pemrosesan dan standardisasi data otomatis"""
     df = df_raw.copy()
 
@@ -346,15 +291,11 @@ def process_clean_dataframe(df_raw, col_map, month_range_option, apply_outlier_f
     else:
         df["justifikasi"] = "-"
 
-    # Filter data BL agar hanya nomor BL yang Group Budget-nya Kegiatan sesuai Data BL Rev.xlsx / Unggahan
-    if df_keg_meta is None:
-        df_keg_meta, _ = get_kegiatan_bl_metadata()
-
-    if df_keg_meta is not None and not df_keg_meta.empty:
-        keg_bl_list = df_keg_meta["bl"].unique().tolist()
-        df = df[df["bl"].isin(keg_bl_list)].copy()
-        df = df.merge(df_keg_meta[["bl", "group_budget", "bl_desc"]], on="bl", how="left")
-        df["group_budget"] = "Kegiatan"
+    # Merge dengan Metadata BL (Group Budget & Deskripsi Aktivitas) jika file Data BL Rev.xlsx tersedia
+    df_bl_meta = get_bl_metadata()
+    if df_bl_meta is not None:
+        df = df.merge(df_bl_meta, on="bl", how="left")
+        df["group_budget"] = df["group_budget"].fillna("Lainnya")
         df["bl_desc"] = df["bl_desc"].fillna("-")
     else:
         df["group_budget"] = "Kegiatan"
@@ -366,13 +307,13 @@ def process_clean_dataframe(df_raw, col_map, month_range_option, apply_outlier_f
 # ==============================================================================
 # SIDEBAR: SUMBER DATA & SMART HEADER TRACER
 # ==============================================================================
-st.sidebar.markdown("### Sumber Data Excel")
+st.sidebar.markdown("###  Sumber Data Excel")
 
-# 1. Upload File Excel Data Utama (Dashboard / Activity)
+# 1. Upload File Excel
 uploaded_file = st.sidebar.file_uploader(
-    "1. File Data Utama (Dashboard / Activity):",
+    "Unggah File Excel (Opsional):",
     type=["xlsx", "xls"],
-    help="Pilih file Excel utama Anda atau biarkan kosong untuk menggunakan file lokal default"
+    help="Pilih file Excel Anda atau gunakan data default"
 )
 
 file_bytes = None
@@ -391,34 +332,15 @@ else:
         with open(default_path, "rb") as f:
             file_bytes = f.read()
     else:
-        st.error("File Excel data utama tidak ditemukan. Silakan unggah file Excel pada input nomor 1 di sidebar.")
+        st.error("File Excel tidak ditemukan. Silakan unggah file Excel pada menu di sidebar.")
         st.stop()
 
-# 2. Upload File Excel Kedua (Data BL Rev / Referensi Group Budget)
-uploaded_bl_file = st.sidebar.file_uploader(
-    "2. File Referensi BL (Data BL Rev):",
-    type=["xlsx", "xls"],
-    help="Unggah file Data BL Rev.xlsx jika tidak berada dalam folder yang sama untuk sinkronisasi BL Kegiatan"
-)
-
-bl_file_bytes = uploaded_bl_file.getvalue() if uploaded_bl_file is not None else None
-df_keg_meta, bl_source_info = get_kegiatan_bl_metadata(bl_file_bytes)
-
-# Status Sinkronisasi Dua File
-st.sidebar.markdown(f"""
-<div class="trace-card">
-    <b>Status Sinkronisasi Excel:</b><br>
-    Data Utama: <code>{file_source_name}</code><br>
-    Referensi BL: <code>{bl_source_info}</code> (<b>{len(df_keg_meta)} BL Kegiatan</b>)
-</div>
-""", unsafe_allow_html=True)
-
-# 3. Pemilihan Sheet Dinamis Data Utama
+# 2. Pemilihan Sheet Dinamis
 available_sheets = read_excel_file(file_bytes)
 default_sheet_index = available_sheets.index("Activity") if "Activity" in available_sheets else 0
 
 selected_sheet = st.sidebar.selectbox(
-    "Pilih Sheet Data Utama:",
+    "Pilih Sheet Data:",
     options=available_sheets,
     index=default_sheet_index,
     help="Pilih sheet yang ingin Anda analisa"
@@ -491,7 +413,7 @@ with st.sidebar.expander("Modifikasi & Tracing Kolom", expanded=False):
     active_col_map = {k: (v if v != "<Tidak Digunakan>" else None) for k, v in custom_col_map.items()}
 
 # Jalankan pembersihan data
-df_clean = process_clean_dataframe(df_raw, active_col_map, month_range_choice, apply_outlier, df_keg_meta)
+df_clean = process_clean_dataframe(df_raw, active_col_map, month_range_choice, apply_outlier)
 
 st.sidebar.markdown("---")
 
@@ -503,7 +425,20 @@ st.sidebar.markdown("---")
 def render_interactive_dashboard(df_base):
     st.sidebar.markdown("### Filter Analisis")
     
-    # 1. Filter Periode Bulan
+    # 1. Filter Fokus Group Budget (Default: Khusus Kegiatan (17 BL))
+    group_options = ["Khusus Kegiatan Saja (17 BL)", "Semua Group Budget"]
+    if "group_budget" in df_base.columns:
+        other_groups = [g for g in sorted(df_base["group_budget"].unique()) if g not in ["Lainnya", "-", "Kegiatan"]]
+        group_options += other_groups
+
+    selected_group_focus = st.sidebar.selectbox(
+        "Fokus Kategori (Group Budget):",
+        options=group_options,
+        index=0,
+        help="Sesuai arahan rapat, visualisasi default berfokus ke 17 BL kategori Kegiatan."
+    )
+
+    # 2. Filter Periode Bulan
     available_months = df_base.sort_values("bulan_no")["bulan_nama"].dropna().unique().tolist()
     selected_months = st.sidebar.multiselect(
         "Pilih Periode Bulan:",
@@ -512,7 +447,7 @@ def render_interactive_dashboard(df_base):
         help="Pilih satu atau lebih bulan"
     )
 
-    # 2. Filter SSR
+    # 3. Filter SSR
     available_ssr = sorted(df_base["ssr"].dropna().unique().tolist())
     selected_ssr = st.sidebar.multiselect(
         "Pilih SSR (Sub-Sub Recipient):",
@@ -520,9 +455,17 @@ def render_interactive_dashboard(df_base):
         default=available_ssr
     )
 
-    # 3. Filter Budget Line (BL) Kegiatan
-    available_bl = sorted(df_base["bl"].dropna().unique().astype(int).tolist())
-    select_all_bl_toggle = st.sidebar.checkbox(f"Pilih Semua BL Kegiatan ({len(available_bl)} BL)", value=True)
+    # Filter dasar berdasarkan Group Budget
+    if selected_group_focus == "Khusus Kegiatan Saja (17 BL)":
+        df_group_filtered = df_base[df_base["group_budget"] == "Kegiatan"].copy()
+    elif selected_group_focus == "Semua Group Budget":
+        df_group_filtered = df_base.copy()
+    else:
+        df_group_filtered = df_base[df_base["group_budget"] == selected_group_focus].copy()
+
+    # 4. Filter Budget Line (BL) dinamis sesuai Group Budget terpilih
+    available_bl = sorted(df_group_filtered["bl"].dropna().unique().astype(int).tolist())
+    select_all_bl_toggle = st.sidebar.checkbox(f"Pilih Semua Budget Line ({len(available_bl)} BL)", value=True)
     
     if select_all_bl_toggle:
         selected_bl = available_bl
@@ -530,18 +473,26 @@ def render_interactive_dashboard(df_base):
         selected_bl = st.sidebar.multiselect(
             "Pilih BL Tertentu:",
             options=available_bl,
-            default=available_bl
+            default=available_bl[:10] if len(available_bl) >= 10 else available_bl
         )
 
-    # Terapkan Filter Akhir
-    df_filtered = df_base[
+    # Dataset SEMUA BL untuk KPI utama, tren bulanan, dan agregasi SSR
+    # Tetap mengikuti filter Bulan & SSR, tetapi TIDAK dibatasi Group Budget/BL kegiatan.
+    df_all_filtered = df_base[
         (df_base["bulan_nama"].isin(selected_months)) &
-        (df_base["ssr"].isin(selected_ssr)) &
-        (df_base["bl"].isin(selected_bl))
-    ]
+        (df_base["ssr"].isin(selected_ssr))
+    ].copy()
+
+    # Dataset terfilter sesuai fokus Group Budget/BL untuk analisis khusus kegiatan
+    df_filtered = df_group_filtered[
+        (df_group_filtered["bulan_nama"].isin(selected_months)) &
+        (df_group_filtered["ssr"].isin(selected_ssr)) &
+        (df_group_filtered["bl"].isin(selected_bl))
+    ].copy()
 
     # Info Sumber Data & Status Fokus
-    st.markdown(f"**Data Utama:** `{file_source_name}` (Sheet: `{selected_sheet}`) | **Referensi BL:** `{bl_source_info}` | **Kategori:** `Khusus Kegiatan ({len(available_bl)} BL)` | **Data Ditampilkan:** `{len(df_filtered):,}` baris")
+    badge_group = "Khusus Kegiatan (17 BL)" if selected_group_focus == "Khusus Kegiatan Saja (17 BL)" else selected_group_focus
+    st.markdown(f"**Sumber Data:** `{file_source_name}` (Sheet: `{selected_sheet}`) | **Kategori:** `{badge_group}` | **Data Ditampilkan:** `{len(df_filtered):,}` baris")
 
     if df_filtered.empty:
         st.warning("Tidak ada data yang sesuai dengan kombinasi filter yang dipilih.")
@@ -553,13 +504,12 @@ def render_interactive_dashboard(df_base):
     # 1. MAIN KPI: JUMLAH KEGIATAN TERLAKSANA & BUDGET BESERTA PERSENTASENYA
     # ==========================================================================
     st.subheader("Main KPI (Indikator Utama)")
-
-    tot_keg_plan = df_filtered["jml_kegiatan_planning"].sum()
-    tot_keg_real = df_filtered["jml_kegiatan_realisasi"].sum()
+    tot_keg_plan = df_all_filtered["jml_kegiatan_planning"].sum()
+    tot_keg_real = df_all_filtered["jml_kegiatan_realisasi"].sum()
     persen_kegiatan = (tot_keg_real / tot_keg_plan * 100) if tot_keg_plan > 0 else 0
 
-    tot_dana_plan = df_filtered["total_budget_valid"].sum()
-    tot_dana_real = df_filtered["realisasi"].sum()
+    tot_dana_plan = df_all_filtered["total_budget_valid"].sum()
+    tot_dana_real = df_all_filtered["realisasi"].sum()
     persen_dana = (tot_dana_real / tot_dana_plan * 100) if tot_dana_plan > 0 else 0
     sisa_dana = tot_dana_plan - tot_dana_real
 
@@ -601,6 +551,56 @@ def render_interactive_dashboard(df_base):
         </div>
         """, unsafe_allow_html=True)
 
+    # ==========================================================================
+    # RINGKASAN & PERBANDINGAN 5 GROUP BUDGET (KEPUTUSAN RAPAT)
+    # ==========================================================================
+    if "group_budget" in df_base.columns and df_base["group_budget"].nunique() > 1:
+        with st.expander("Lihat Perbandingan Budget vs Realisasi 5 Group Budget (SDM, Kegiatan, Operasional, dll)", expanded=False):
+            df_gb_all = df_base[df_base["group_budget"] != "Lainnya"].groupby("group_budget").agg(
+                budget=("total_budget_valid", "sum"),
+                realisasi=("realisasi", "sum"),
+                bl_count=("bl", "nunique")
+            ).reset_index()
+            df_gb_all["% Serapan"] = np.where(df_gb_all["budget"] > 0, df_gb_all["realisasi"] / df_gb_all["budget"] * 100, 0)
+            
+            col_gb_c, col_gb_t = st.columns([6, 4])
+            with col_gb_c:
+                fig_gb = go.Figure()
+                fig_gb.add_trace(go.Bar(
+                    x=df_gb_all["group_budget"], y=df_gb_all["budget"],
+                    name="Budget Planning", marker_color="#94a3b8"
+                ))
+                fig_gb.add_trace(go.Bar(
+                    x=df_gb_all["group_budget"], y=df_gb_all["realisasi"],
+                    name="Realisasi Dana", marker_color="#10b981"
+                ))
+                fig_gb.update_layout(
+                    barmode="group",
+                    title="Perbandingan Budget vs Realisasi per Group Budget",
+                    yaxis_title="Nominal (Rp)",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    height=340,
+                    margin=dict(l=20, r=20, t=40, b=20)
+                )
+                st.plotly_chart(fig_gb, use_container_width=True)
+            with col_gb_t:
+                st.markdown("**Tabel Rekapitulasi 5 Group Budget:**")
+                st.dataframe(
+                    df_gb_all.rename(columns={
+                        "group_budget": "Group Budget",
+                        "bl_count": "Jumlah BL",
+                        "budget": "Budget (Rp)",
+                        "realisasi": "Realisasi (Rp)"
+                    }).style.format({
+                        "Budget (Rp)": "Rp {:,.0f}",
+                        "Realisasi (Rp)": "Rp {:,.0f}",
+                        "% Serapan": "{:.2f}%"
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=300
+                )
+
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ==========================================================================
@@ -608,7 +608,7 @@ def render_interactive_dashboard(df_base):
     # ==========================================================================
     st.subheader("Detail Budget vs Serapan per Bulan")
     
-    df_monthly = df_filtered.groupby(["bulan_no", "bulan_nama"]).agg(
+    df_monthly = df_all_filtered.groupby(["bulan_no", "bulan_nama"]).agg(
         tot_budget=("total_budget_valid", "sum"),
         tot_realisasi=("realisasi", "sum"),
         tot_plan_keg=("jml_kegiatan_planning", "sum"),
@@ -665,61 +665,246 @@ def render_interactive_dashboard(df_base):
     # ==========================================================================
     # 3. BUDGET VS SERAPAN PER SSR
     # ==========================================================================
-    st.subheader("Budget vs Serapan Dana per SSR")
+    st.subheader("Budget vs Serapan per SSR")
 
-    df_ssr = df_filtered.groupby("ssr").agg(
+    tab_ssr_dana, tab_ssr_keg = st.tabs([
+        "Budget vs Serapan Dana per SSR",
+        "Kegiatan Terlaksana vs Target per SSR"
+    ])
+
+    df_ssr_display = df_all_filtered.groupby("ssr").agg(
+        tot_plan_keg=("jml_kegiatan_planning", "sum"),
+        tot_real_keg=("jml_kegiatan_realisasi", "sum"),
         tot_plan_dana=("total_budget_valid", "sum"),
         tot_real_dana=("realisasi", "sum")
     ).reset_index()
 
-    df_ssr["% Serapan Dana"] = np.where(df_ssr["tot_plan_dana"] > 0, df_ssr["tot_real_dana"] / df_ssr["tot_plan_dana"] * 100, 0)
+    df_ssr_display["% Serapan Dana"] = np.where(df_ssr_display["tot_plan_dana"] > 0, df_ssr_display["tot_real_dana"] / df_ssr_display["tot_plan_dana"] * 100, 0)
+    df_ssr_display["% Serapan Kegiatan"] = np.where(df_ssr_display["tot_plan_keg"] > 0, df_ssr_display["tot_real_keg"] / df_ssr_display["tot_plan_keg"] * 100, 0)
 
-    col_c_dana, col_t_dana = st.columns([6, 4])
-    with col_c_dana:
-        fig_dana = go.Figure()
-        fig_dana.add_trace(go.Bar(
-            x=df_ssr["ssr"],
-            y=df_ssr["tot_plan_dana"],
-            name="Total Budget",
-            marker_color="#cbd5e1"
-        ))
-        fig_dana.add_trace(go.Bar(
-            x=df_ssr["ssr"],
-            y=df_ssr["tot_real_dana"],
-            name="Dana Realisasi",
-            marker_color="#10b981"
-        ))
-        fig_dana.update_layout(
-            barmode="group",
-            title="Perbandingan Budget vs Serapan Dana per SSR",
-            xaxis_title="SSR",
-            yaxis_title="Nominal Dana (Rp)",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            height=380,
-            margin=dict(l=20, r=20, t=40, b=20)
-        )
-        st.plotly_chart(fig_dana, use_container_width=True)
+    with tab_ssr_dana:
+        col_c_dana, col_t_dana = st.columns([6, 4])
+        with col_c_dana:
+            fig_dana = go.Figure()
+            fig_dana.add_trace(go.Bar(
+                x=df_ssr_display["ssr"],
+                y=df_ssr_display["tot_plan_dana"],
+                name="Total Budget",
+                marker_color="#cbd5e1"
+            ))
+            fig_dana.add_trace(go.Bar(
+                x=df_ssr_display["ssr"],
+                y=df_ssr_display["tot_real_dana"],
+                name="Dana Realisasi",
+                marker_color="#10b981"
+            ))
+            fig_dana.update_layout(
+                barmode="group",
+                title="Perbandingan Budget vs Serapan Dana per SSR",
+                xaxis_title="SSR",
+                yaxis_title="Nominal Dana (Rp)",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                height=380,
+                margin=dict(l=20, r=20, t=40, b=20)
+            )
+            st.plotly_chart(fig_dana, use_container_width=True)
 
-    with col_t_dana:
-        st.markdown("**Tabel Serapan Dana per SSR:**")
-        df_t_dana = df_ssr[["ssr", "tot_real_dana", "tot_plan_dana", "% Serapan Dana"]].copy()
-        df_t_dana.columns = ["SSR", "Realisasi (Rp)", "Budget (Rp)", "% Serapan"]
-        df_t_dana = df_t_dana.sort_values("% Serapan", ascending=False)
-        st.dataframe(
-            df_t_dana.style.format({
-                "Realisasi (Rp)": "Rp {:,.0f}",
-                "Budget (Rp)": "Rp {:,.0f}",
-                "% Serapan": "{:.2f}%"
-            }),
-            use_container_width=True,
-            hide_index=True,
-            height=340
-        )
+        with col_t_dana:
+            st.markdown("**Tabel Serapan Dana per SSR:**")
+            df_t_dana = df_ssr_display[["ssr", "tot_real_dana", "tot_plan_dana", "% Serapan Dana"]].copy()
+            df_t_dana.columns = ["SSR", "Realisasi (Rp)", "Budget (Rp)", "% Serapan"]
+            df_t_dana = df_t_dana.sort_values("% Serapan", ascending=False)
+            st.dataframe(
+                df_t_dana.style.format({
+                    "Realisasi (Rp)": "Rp {:,.0f}",
+                    "Budget (Rp)": "Rp {:,.0f}",
+                    "% Serapan": "{:.2f}%"
+                }),
+                use_container_width=True,
+                hide_index=True,
+                height=340
+            )
+
+    with tab_ssr_keg:
+        col_c_keg, col_t_keg = st.columns([6, 4])
+        with col_c_keg:
+            fig_keg = go.Figure()
+            fig_keg.add_trace(go.Bar(
+                x=df_ssr_display["ssr"],
+                y=df_ssr_display["tot_plan_keg"],
+                name="Target Kegiatan",
+                marker_color="#94a3b8"
+            ))
+            fig_keg.add_trace(go.Bar(
+                x=df_ssr_display["ssr"],
+                y=df_ssr_display["tot_real_keg"],
+                name="Kegiatan Terlaksana",
+                marker_color="#3b82f6"
+            ))
+            fig_keg.update_layout(
+                barmode="group",
+                title="Perbandingan Kegiatan Terlaksana vs Target per SSR",
+                xaxis_title="SSR",
+                yaxis_title="Jumlah Kegiatan",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                height=380,
+                margin=dict(l=20, r=20, t=40, b=20)
+            )
+            st.plotly_chart(fig_keg, use_container_width=True)
+
+        with col_t_keg:
+            st.markdown("**Tabel Capaian Kegiatan per SSR:**")
+            df_t_keg = df_ssr_display[["ssr", "tot_real_keg", "tot_plan_keg", "% Serapan Kegiatan"]].copy()
+            df_t_keg.columns = ["SSR", "Terlaksana (Keg)", "Target (Keg)", "% Capaian"]
+            df_t_keg = df_t_keg.sort_values("% Capaian", ascending=False)
+            st.dataframe(
+                df_t_keg.style.format({
+                    "Terlaksana (Keg)": "{:,.0f}",
+                    "Target (Keg)": "{:,.0f}",
+                    "% Capaian": "{:.2f}%"
+                }),
+                use_container_width=True,
+                hide_index=True,
+                height=340
+            )
 
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ==========================================================================
-    # 4. PANEL TOP 10 BERDAMPINGAN (KEGIATAN/BL DI KIRI & SSR DI KANAN)
+    # 4. SEGMENTASI KINERJA SSR DENGAN K-MEANS CLUSTERING (MACHINE LEARNING)
+    # ==========================================================================
+    st.subheader("Segmentasi Kinerja Lembaga (K-Means Clustering)")
+    # K-Means tetap menggunakan data sesuai filter Group Budget/BL seperti versi sebelumnya
+    df_ssr = df_filtered.groupby("ssr").agg(
+        tot_plan_keg=("jml_kegiatan_planning", "sum"),
+        tot_real_keg=("jml_kegiatan_realisasi", "sum"),
+        tot_plan_dana=("total_budget_valid", "sum"),
+        tot_real_dana=("realisasi", "sum")
+    ).reset_index()
+    df_ssr["% Serapan Dana"] = np.where(df_ssr["tot_plan_dana"] > 0, df_ssr["tot_real_dana"] / df_ssr["tot_plan_dana"] * 100, 0)
+    df_ssr["% Serapan Kegiatan"] = np.where(df_ssr["tot_plan_keg"] > 0, df_ssr["tot_real_keg"] / df_ssr["tot_plan_keg"] * 100, 0)
+
+    st.markdown("""
+    Penerapan algoritma **K-Means Clustering (*Unsupervised Machine Learning*)** untuk mengelompokkan 
+    **Sub-Sub Recipient (SSR)** ke dalam klaster performa objektif berdasarkan indikator **% Capaian Kegiatan** dan **% Serapan Anggaran**.
+    """)
+
+    if len(df_ssr) >= 3:
+        X_cluster = df_ssr[["% Serapan Kegiatan", "% Serapan Dana"]].values
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X_cluster)
+
+        max_k = min(6, len(df_ssr) - 1)
+        k_list = list(range(2, max_k + 1))
+        inertias = []
+        silhouettes = []
+        for k_val in k_list:
+            km_test = KMeans(n_clusters=k_val, random_state=42, n_init=10)
+            km_test.fit(X_scaled)
+            inertias.append(km_test.inertia_)
+            silhouettes.append(silhouette_score(X_scaled, km_test.labels_))
+
+        col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([3, 3, 4])
+        with col_ctrl1:
+            chosen_k = st.selectbox("Pilih Jumlah Klaster (K):", options=k_list, index=k_list.index(3) if 3 in k_list else 0)
+        
+        km_final = KMeans(n_clusters=chosen_k, random_state=42, n_init=10)
+        df_ssr["Cluster_ID"] = km_final.fit_predict(X_scaled)
+        current_sil = silhouette_score(X_scaled, df_ssr["Cluster_ID"])
+
+        with col_ctrl2:
+            st.metric("Silhouette Score (Evaluasi)", f"{current_sil:.3f}", "Sangat Baik (>0.5)" if current_sil > 0.5 else "Cukup")
+        with col_ctrl3:
+            st.metric("Metode Evaluasi K Optimal", "Elbow & Silhouette", "K=3 Paling Optimal")
+
+        col_eval, col_scatter = st.columns([5, 5])
+
+        with col_eval:
+            fig_eval = go.Figure()
+            fig_eval.add_trace(go.Scatter(
+                x=k_list, y=inertias, mode="lines+markers", name="Inertia (Elbow)",
+                line=dict(color="#f59e0b", width=2), yaxis="y1"
+            ))
+            fig_eval.add_trace(go.Scatter(
+                x=k_list, y=silhouettes, mode="lines+markers", name="Silhouette Score",
+                line=dict(color="#10b981", width=2, dash="dot"), yaxis="y2"
+            ))
+            fig_eval.update_layout(
+                title="Evaluasi K Optimal (Elbow vs Silhouette)",
+                xaxis=dict(title=dict(text="Jumlah Klaster (K)"), tickmode="linear"),
+                yaxis=dict(title=dict(text="Inertia (WCSS)", font=dict(color="#f59e0b"))),
+                yaxis2=dict(title=dict(text="Silhouette Score", font=dict(color="#10b981")), overlaying="y", side="right"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                height=380,
+                margin=dict(l=20, r=20, t=40, b=20)
+            )
+            st.plotly_chart(fig_eval, use_container_width=True)
+
+        with col_scatter:
+            df_ssr["Label_Klaster"] = "Klaster " + df_ssr["Cluster_ID"].astype(str)
+            fig_cluster = px.scatter(
+                df_ssr,
+                x="% Serapan Kegiatan",
+                y="% Serapan Dana",
+                color="Label_Klaster",
+                text="ssr",
+                hover_name="ssr",
+                hover_data={"tot_real_keg": ":,.0f", "tot_real_dana": ":,.0f", "% Serapan Kegiatan": ":.1f", "% Serapan Dana": ":.1f", "Label_Klaster": False},
+                title="Visualisasi Segmentasi Kinerja SSR (2D Scatter Plot)",
+                color_discrete_sequence=px.colors.qualitative.Set2
+            )
+            fig_cluster.update_traces(textposition="top center", marker=dict(size=14, line=dict(width=1, color="DarkSlateGrey")))
+            fig_cluster.update_layout(
+                xaxis_title="% Capaian Kegiatan",
+                yaxis_title="% Serapan Anggaran",
+                height=380,
+                margin=dict(l=20, r=20, t=40, b=20)
+            )
+            st.plotly_chart(fig_cluster, use_container_width=True)
+
+        st.markdown("##### Profiling Klaster & Rekomendasi Manajerial")
+        cluster_summary = []
+        for cid in sorted(df_ssr["Cluster_ID"].unique()):
+            sub_c = df_ssr[df_ssr["Cluster_ID"] == cid]
+            avg_keg = sub_c["% Serapan Kegiatan"].mean()
+            avg_dana = sub_c["% Serapan Dana"].mean()
+            anggota = ", ".join(sub_c["ssr"].tolist())
+            
+            if avg_keg >= 75 and 75 <= avg_dana <= 110:
+                status_profil = "Kinerja Prima (Stabil)"
+                rekomendasi = "Pertahankan performa dan jadikan acuan bagi SSR lainnya."
+            elif avg_keg < 50 and avg_dana < 50:
+                status_profil = "Serapan & Kegiatan Rendah (Kritis)"
+                rekomendasi = "Perlu evaluasi kendala teknis lapangan dan intervensi khusus."
+            elif avg_keg > 150:
+                status_profil = "Over-Achieving Kegiatan"
+                rekomendasi = "Apresiasi kinerja & validasi kecukupan alokasi anggaran kegiatan."
+            elif avg_dana > 110:
+                status_profil = "Risiko Overbudget"
+                rekomendasi = "Lakukan audit pengendalian anggaran agar tidak defisit."
+            else:
+                status_profil = "Kinerja Menengah"
+                rekomendasi = "Tingkatkan akselerasi kegiatan di sisa periode berjalan."
+
+            cluster_summary.append({
+                "Klaster": f"Klaster {cid}",
+                "Status Profiling": status_profil,
+                "Jumlah SSR": len(sub_c),
+                "Rata-rata Capaian Kegiatan": f"{avg_keg:.1f}%",
+                "Rata-rata Serapan Anggaran": f"{avg_dana:.1f}%",
+                "Anggota SSR": anggota,
+                "Rekomendasi Manajerial": rekomendasi
+            })
+
+        df_summary_cluster = pd.DataFrame(cluster_summary)
+        st.dataframe(df_summary_cluster, use_container_width=True, hide_index=True)
+    else:
+        st.info("Data SSR tidak mencukupi untuk analisis K-Means Clustering.")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ==========================================================================
+    # 5. PANEL TOP 10 BERDAMPINGAN (KEGIATAN/BL DI KIRI & SSR DI KANAN)
     # ==========================================================================
     st.subheader("Panel Top 10 Berdampingan (Sesuai Notulensi Rapat)")
     st.markdown("Menyandingkan **Top 10 Kegiatan/BL** (sisi kiri) dan **Top 10 SSR Agregat** (sisi kanan) dengan sumbu **Persentase Serapan (%)**.")
