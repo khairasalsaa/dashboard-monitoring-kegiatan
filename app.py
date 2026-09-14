@@ -291,15 +291,39 @@ def process_clean_dataframe(df_raw, col_map, month_range_option, apply_outlier_f
     else:
         df["justifikasi"] = "-"
 
-    # Merge dengan Metadata BL (Group Budget & Deskripsi Aktivitas) jika file Data BL Rev.xlsx tersedia
-    df_bl_meta = get_bl_metadata()
-    if df_bl_meta is not None:
-        df = df.merge(df_bl_meta, on="bl", how="left")
-        df["group_budget"] = df["group_budget"].fillna("Lainnya")
-        df["bl_desc"] = df["bl_desc"].fillna("-")
+    # Group Budget: prioritaskan kolom yang SUDAH ADA di Excel terbaru (mis. "Grup budget").
+    # Ini penting agar data ALL BL tetap utuh, sementara 17 BL kategori Kegiatan tetap bisa difilter dengan benar.
+    group_col = None
+    for c in df.columns:
+        c_low = str(c).strip().lower()
+        if c_low in ["grup budget", "group budget", "group_budget", "kategori budget", "kelompok budget"]:
+            group_col = c
+            break
+
+    if group_col is not None:
+        df["group_budget"] = df[group_col].fillna("Lainnya").astype(str).str.strip()
+        if group_col != "group_budget":
+            df = df.drop(columns=[group_col])
+        # Deskripsi aktivitas tetap dicoba dari metadata eksternal jika tersedia, tanpa mengubah group budget dari Excel utama.
+        df_bl_meta = get_bl_metadata()
+        if df_bl_meta is not None:
+            meta_desc = df_bl_meta[["bl", "bl_desc"]].drop_duplicates(subset=["bl"])
+            df = df.merge(meta_desc, on="bl", how="left")
+            df["bl_desc"] = df["bl_desc"].fillna("-")
+        else:
+            df["bl_desc"] = "-"
     else:
-        df["group_budget"] = "Kegiatan"
-        df["bl_desc"] = "-"
+        # Fallback untuk file lama yang belum punya kolom Group Budget.
+        df_bl_meta = get_bl_metadata()
+        if df_bl_meta is not None:
+            df = df.merge(df_bl_meta, on="bl", how="left")
+            df["group_budget"] = df["group_budget"].fillna("Lainnya")
+            df["bl_desc"] = df["bl_desc"].fillna("-")
+        else:
+            # Daftar 17 BL Kegiatan sesuai referensi proyek. BL lain tetap dipertahankan sebagai kategori Lainnya.
+            kegiatan_bls = {36, 37, 38, 39, 40, 49, 54, 55, 56, 61, 62, 68, 69, 74, 78, 80, 154}
+            df["group_budget"] = np.where(df["bl"].isin(kegiatan_bls), "Kegiatan", "Lainnya")
+            df["bl_desc"] = "-"
 
     return df.reset_index(drop=True)
 
