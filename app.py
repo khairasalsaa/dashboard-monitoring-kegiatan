@@ -476,8 +476,8 @@ st.sidebar.markdown("---")
 def render_interactive_dashboard(df_base):
     st.sidebar.markdown("### Filter Analisis")
     
-    # 1. Filter Fokus Group Budget (Default: Khusus Kegiatan (17 BL))
-    group_options = ["Khusus Kegiatan Saja (17 BL)", "Semua Group Budget"]
+    # 1. Filter Fokus Group Budget (Default: Semua Group Budget)
+    group_options = ["Semua Group Budget", "Khusus Kegiatan Saja (17 BL)"]
     if "group_budget" in df_base.columns:
         other_groups = [g for g in sorted(df_base["group_budget"].unique()) if g not in ["Lainnya", "-", "Kegiatan"]]
         group_options += other_groups
@@ -486,7 +486,7 @@ def render_interactive_dashboard(df_base):
         "Fokus Kategori (Group Budget):",
         options=group_options,
         index=0,
-        help="Sesuai arahan rapat, visualisasi default berfokus ke 17 BL kategori Kegiatan."
+        help="Default visualisasi menampilkan seluruh kategori Group Budget (semua BL)."
     )
 
     # 2. Filter Periode Bulan
