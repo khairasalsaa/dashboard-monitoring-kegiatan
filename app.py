@@ -909,6 +909,14 @@ def render_interactive_dashboard(df_base):
     st.subheader("Panel Top 10 Berdampingan (Sesuai Notulensi Rapat)")
     st.markdown("Menyandingkan **Top 10 Kegiatan/BL** (sisi kiri) dan **Top 10 SSR Agregat** (sisi kanan) dengan sumbu **Persentase Serapan (%)**.")
 
+    # 1. Dataset khusus 17 BL Kegiatan (sesuai notulensi/versi sebelumnya)
+    kegiatan_17_bl = [36, 37, 38, 39, 40, 49, 54, 55, 56, 61, 62, 68, 69, 74, 78, 80, 154]
+    df_top10 = df_base[
+        (df_base["bulan_nama"].isin(selected_months)) &
+        (df_base["ssr"].isin(selected_ssr)) &
+        (df_base["bl"].isin(kegiatan_17_bl))
+    ].copy()
+
     # 1. Agregasi BL
     agg_dict = {
         "tot_plan_dana": ("total_budget_valid", "sum"),
@@ -916,12 +924,12 @@ def render_interactive_dashboard(df_base):
         "tot_plan_keg": ("jml_kegiatan_planning", "sum"),
         "tot_real_keg": ("jml_kegiatan_realisasi", "sum")
     }
-    if "bl_desc" in df_filtered.columns:
+    if "bl_desc" in df_top10.columns:
         agg_dict["bl_desc"] = ("bl_desc", "first")
-    if "group_budget" in df_filtered.columns:
+    if "group_budget" in df_top10.columns:
         agg_dict["group_budget"] = ("group_budget", "first")
 
-    df_bl = df_filtered.groupby("bl").agg(**agg_dict).reset_index()
+    df_bl = df_top10.groupby("bl").agg(**agg_dict).reset_index()
     df_bl_active = df_bl[df_bl["tot_plan_dana"] > 0].copy()
     df_bl_active["% Serapan"] = (df_bl_active["tot_real_dana"] / df_bl_active["tot_plan_dana"]) * 100
     df_bl_active["BL_Label"] = "BL " + df_bl_active["bl"].astype(int).astype(str)
@@ -931,7 +939,7 @@ def render_interactive_dashboard(df_base):
     top_10_bl = df_bl_active.sort_values("% Serapan", ascending=False).head(10)
 
     # 2. Agregasi SSR
-    df_ssr_top = df_filtered.groupby("ssr").agg(
+    df_ssr_top = df_top10.groupby("ssr").agg(
         tot_plan_dana=("total_budget_valid", "sum"),
         tot_real_dana=("realisasi", "sum")
     ).reset_index()
