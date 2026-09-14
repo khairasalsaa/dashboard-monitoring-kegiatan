@@ -576,54 +576,48 @@ def render_interactive_dashboard(df_base):
         """, unsafe_allow_html=True)
 
     # ==========================================================================
-    # RINGKASAN & PERBANDINGAN 5 GROUP BUDGET (KEPUTUSAN RAPAT)
+    # KOMPOSISI 5 KATEGORI GROUP BUDGET (ALL BL) - PIE CHART BUDGET ONLY
     # ==========================================================================
-    if "group_budget" in df_base.columns and df_base["group_budget"].nunique() > 1:
-        with st.expander("Lihat Perbandingan Budget vs Realisasi 5 Group Budget (SDM, Kegiatan, Operasional, dll)", expanded=False):
-            df_gb_all = df_base[df_base["group_budget"] != "Lainnya"].groupby("group_budget").agg(
-                budget=("total_budget_valid", "sum"),
-                realisasi=("realisasi", "sum"),
-                bl_count=("bl", "nunique")
-            ).reset_index()
-            df_gb_all["% Serapan"] = np.where(df_gb_all["budget"] > 0, df_gb_all["realisasi"] / df_gb_all["budget"] * 100, 0)
-            
-            col_gb_c, col_gb_t = st.columns([6, 4])
-            with col_gb_c:
-                fig_gb = go.Figure()
-                fig_gb.add_trace(go.Bar(
-                    x=df_gb_all["group_budget"], y=df_gb_all["budget"],
-                    name="Budget Planning", marker_color="#94a3b8"
-                ))
-                fig_gb.add_trace(go.Bar(
-                    x=df_gb_all["group_budget"], y=df_gb_all["realisasi"],
-                    name="Realisasi Dana", marker_color="#10b981"
-                ))
-                fig_gb.update_layout(
-                    barmode="group",
-                    title="Perbandingan Budget vs Realisasi per Group Budget",
-                    yaxis_title="Nominal (Rp)",
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                    height=340,
-                    margin=dict(l=20, r=20, t=40, b=20)
-                )
-                st.plotly_chart(fig_gb, use_container_width=True)
-            with col_gb_t:
-                st.markdown("**Tabel Rekapitulasi 5 Group Budget:**")
-                st.dataframe(
-                    df_gb_all.rename(columns={
-                        "group_budget": "Group Budget",
-                        "bl_count": "Jumlah BL",
-                        "budget": "Budget (Rp)",
-                        "realisasi": "Realisasi (Rp)"
-                    }).style.format({
-                        "Budget (Rp)": "Rp {:,.0f}",
-                        "Realisasi (Rp)": "Rp {:,.0f}",
-                        "% Serapan": "{:.2f}%"
-                    }),
-                    use_container_width=True,
-                    hide_index=True,
-                    height=300
-                )
+    # Pie chart hanya menunjukkan KOMPOSISI TOTAL BUDGET.
+    # Tidak menggunakan realisasi maupun % serapan dalam perhitungan/tooltip.
+    # Sumber kategori berasal dari seluruh BL (ALL BL), bukan hanya 17 BL Kegiatan.
+    if "group_budget" in df_all_filtered.columns:
+        kategori_utama = ["SDM", "Kegiatan", "Aset", "Operasional", "Performance Based"]
+
+        df_gb_budget = (
+            df_all_filtered[df_all_filtered["group_budget"].isin(kategori_utama)]
+            .groupby("group_budget", as_index=False)
+            .agg(budget=("total_budget_valid", "sum"))
+        )
+
+        # Pastikan 5 kategori tetap tersedia walaupun salah satu bernilai 0.
+        df_gb_budget = (
+            pd.DataFrame({"group_budget": kategori_utama})
+            .merge(df_gb_budget, on="group_budget", how="left")
+            .fillna({"budget": 0})
+        )
+
+        st.subheader("Komposisi Budget berdasarkan 5 Kategori BL")
+        st.caption("Pie chart menunjukkan proporsi total budget ALL BL untuk kategori SDM, Kegiatan, Aset, Operasional, dan Performance Based.")
+
+        fig_gb_pie = px.pie(
+            df_gb_budget,
+            names="group_budget",
+            values="budget",
+            hole=0.38,
+            title="Proporsi Total Budget per Kategori"
+        )
+        fig_gb_pie.update_traces(
+            textposition="inside",
+            textinfo="percent+label",
+            hovertemplate=(
+                "<b>%{label}</b><br>"
+                "Budget: Rp %{value:,.0f}<br>"
+                "Proporsi: %{percent}<extra></extra>"
+            )
+        )
+        fig_gb_pie.update_layout(height=390, margin=dict(l=20, r=20, t=55, b=20))
+        st.plotly_chart(fig_gb_pie, use_container_width=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -687,110 +681,64 @@ def render_interactive_dashboard(df_base):
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ==========================================================================
-    # 3. BUDGET VS SERAPAN PER SSR
+    # 3. BUDGET VS SERAPAN DANA PER SSR (ALL BL)
     # ==========================================================================
-    st.subheader("Budget vs Serapan per SSR")
-
-    tab_ssr_dana, tab_ssr_keg = st.tabs([
-        "Budget vs Serapan Dana per SSR",
-        "Kegiatan Terlaksana vs Target per SSR"
-    ])
+    # Hanya menampilkan Budget vs Serapan Dana per SSR.
+    # Chart "Kegiatan Terlaksana vs Target per SSR" sengaja dihapus sesuai revisi.
+    st.subheader("Budget vs Serapan Dana per SSR")
 
     df_ssr_display = df_all_filtered.groupby("ssr").agg(
-        tot_plan_keg=("jml_kegiatan_planning", "sum"),
-        tot_real_keg=("jml_kegiatan_realisasi", "sum"),
         tot_plan_dana=("total_budget_valid", "sum"),
         tot_real_dana=("realisasi", "sum")
     ).reset_index()
 
-    df_ssr_display["% Serapan Dana"] = np.where(df_ssr_display["tot_plan_dana"] > 0, df_ssr_display["tot_real_dana"] / df_ssr_display["tot_plan_dana"] * 100, 0)
-    df_ssr_display["% Serapan Kegiatan"] = np.where(df_ssr_display["tot_plan_keg"] > 0, df_ssr_display["tot_real_keg"] / df_ssr_display["tot_plan_keg"] * 100, 0)
+    df_ssr_display["% Serapan Dana"] = np.where(
+        df_ssr_display["tot_plan_dana"] > 0,
+        df_ssr_display["tot_real_dana"] / df_ssr_display["tot_plan_dana"] * 100,
+        0
+    )
 
-    with tab_ssr_dana:
-        col_c_dana, col_t_dana = st.columns([6, 4])
-        with col_c_dana:
-            fig_dana = go.Figure()
-            fig_dana.add_trace(go.Bar(
-                x=df_ssr_display["ssr"],
-                y=df_ssr_display["tot_plan_dana"],
-                name="Total Budget",
-                marker_color="#cbd5e1"
-            ))
-            fig_dana.add_trace(go.Bar(
-                x=df_ssr_display["ssr"],
-                y=df_ssr_display["tot_real_dana"],
-                name="Dana Realisasi",
-                marker_color="#10b981"
-            ))
-            fig_dana.update_layout(
-                barmode="group",
-                title="Perbandingan Budget vs Serapan Dana per SSR",
-                xaxis_title="SSR",
-                yaxis_title="Nominal Dana (Rp)",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                height=380,
-                margin=dict(l=20, r=20, t=40, b=20)
-            )
-            st.plotly_chart(fig_dana, use_container_width=True)
+    col_c_dana, col_t_dana = st.columns([6, 4])
+    with col_c_dana:
+        fig_dana = go.Figure()
+        fig_dana.add_trace(go.Bar(
+            x=df_ssr_display["ssr"],
+            y=df_ssr_display["tot_plan_dana"],
+            name="Total Budget",
+            marker_color="#cbd5e1"
+        ))
+        fig_dana.add_trace(go.Bar(
+            x=df_ssr_display["ssr"],
+            y=df_ssr_display["tot_real_dana"],
+            name="Dana Realisasi",
+            marker_color="#10b981"
+        ))
+        fig_dana.update_layout(
+            barmode="group",
+            title="Perbandingan Budget vs Serapan Dana per SSR",
+            xaxis_title="SSR",
+            yaxis_title="Nominal Dana (Rp)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            height=380,
+            margin=dict(l=20, r=20, t=40, b=20)
+        )
+        st.plotly_chart(fig_dana, use_container_width=True)
 
-        with col_t_dana:
-            st.markdown("**Tabel Serapan Dana per SSR:**")
-            df_t_dana = df_ssr_display[["ssr", "tot_real_dana", "tot_plan_dana", "% Serapan Dana"]].copy()
-            df_t_dana.columns = ["SSR", "Realisasi (Rp)", "Budget (Rp)", "% Serapan"]
-            df_t_dana = df_t_dana.sort_values("% Serapan", ascending=False)
-            st.dataframe(
-                df_t_dana.style.format({
-                    "Realisasi (Rp)": "Rp {:,.0f}",
-                    "Budget (Rp)": "Rp {:,.0f}",
-                    "% Serapan": "{:.2f}%"
-                }),
-                use_container_width=True,
-                hide_index=True,
-                height=340
-            )
-
-    with tab_ssr_keg:
-        col_c_keg, col_t_keg = st.columns([6, 4])
-        with col_c_keg:
-            fig_keg = go.Figure()
-            fig_keg.add_trace(go.Bar(
-                x=df_ssr_display["ssr"],
-                y=df_ssr_display["tot_plan_keg"],
-                name="Target Kegiatan",
-                marker_color="#94a3b8"
-            ))
-            fig_keg.add_trace(go.Bar(
-                x=df_ssr_display["ssr"],
-                y=df_ssr_display["tot_real_keg"],
-                name="Kegiatan Terlaksana",
-                marker_color="#3b82f6"
-            ))
-            fig_keg.update_layout(
-                barmode="group",
-                title="Perbandingan Kegiatan Terlaksana vs Target per SSR",
-                xaxis_title="SSR",
-                yaxis_title="Jumlah Kegiatan",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                height=380,
-                margin=dict(l=20, r=20, t=40, b=20)
-            )
-            st.plotly_chart(fig_keg, use_container_width=True)
-
-        with col_t_keg:
-            st.markdown("**Tabel Capaian Kegiatan per SSR:**")
-            df_t_keg = df_ssr_display[["ssr", "tot_real_keg", "tot_plan_keg", "% Serapan Kegiatan"]].copy()
-            df_t_keg.columns = ["SSR", "Terlaksana (Keg)", "Target (Keg)", "% Capaian"]
-            df_t_keg = df_t_keg.sort_values("% Capaian", ascending=False)
-            st.dataframe(
-                df_t_keg.style.format({
-                    "Terlaksana (Keg)": "{:,.0f}",
-                    "Target (Keg)": "{:,.0f}",
-                    "% Capaian": "{:.2f}%"
-                }),
-                use_container_width=True,
-                hide_index=True,
-                height=340
-            )
+    with col_t_dana:
+        st.markdown("**Tabel Serapan Dana per SSR:**")
+        df_t_dana = df_ssr_display[["ssr", "tot_real_dana", "tot_plan_dana", "% Serapan Dana"]].copy()
+        df_t_dana.columns = ["SSR", "Realisasi (Rp)", "Budget (Rp)", "% Serapan"]
+        df_t_dana = df_t_dana.sort_values("% Serapan", ascending=False)
+        st.dataframe(
+            df_t_dana.style.format({
+                "Realisasi (Rp)": "Rp {:,.0f}",
+                "Budget (Rp)": "Rp {:,.0f}",
+                "% Serapan": "{:.2f}%"
+            }),
+            use_container_width=True,
+            hide_index=True,
+            height=340
+        )
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -798,8 +746,15 @@ def render_interactive_dashboard(df_base):
     # 4. SEGMENTASI KINERJA SSR DENGAN K-MEANS CLUSTERING (MACHINE LEARNING)
     # ==========================================================================
     st.subheader("Segmentasi Kinerja Lembaga (K-Means Clustering)")
-    # K-Means tetap menggunakan data sesuai filter Group Budget/BL seperti versi sebelumnya
-    df_ssr = df_filtered.groupby("ssr").agg(
+    # K-Means khusus 17 BL Kegiatan, tetap mengikuti filter Bulan & SSR.
+    kegiatan_17_bl = [36, 37, 38, 39, 40, 49, 54, 55, 56, 61, 62, 68, 69, 74, 78, 80, 154]
+    df_kmeans = df_base[
+        (df_base["bulan_nama"].isin(selected_months)) &
+        (df_base["ssr"].isin(selected_ssr)) &
+        (df_base["bl"].isin(kegiatan_17_bl))
+    ].copy()
+
+    df_ssr = df_kmeans.groupby("ssr").agg(
         tot_plan_keg=("jml_kegiatan_planning", "sum"),
         tot_real_keg=("jml_kegiatan_realisasi", "sum"),
         tot_plan_dana=("total_budget_valid", "sum"),
