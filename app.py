@@ -302,6 +302,21 @@ def process_clean_dataframe(df_raw, col_map, month_range_option, apply_outlier_f
 
     if group_col is not None:
         df["group_budget"] = df[group_col].fillna("Lainnya").astype(str).str.strip()
+        # Normalisasi ejaan kategori agar pie chart tidak kehilangan kategori karena spasi/case.
+        gb_norm = {
+            "sdm": "SDM",
+            "salary": "SDM",
+            "kegiatan": "Kegiatan",
+            "activity": "Kegiatan",
+            "aset": "Aset",
+            "asset": "Aset",
+            "operasional": "Operasional",
+            "management/fixed cost": "Operasional",
+            "management fixed cost": "Operasional",
+            "performance based": "Performance Based",
+            "pb pl": "Performance Based",
+        }
+        df["group_budget"] = df["group_budget"].apply(lambda x: gb_norm.get(str(x).strip().lower(), str(x).strip()))
         if group_col != "group_budget":
             df = df.drop(columns=[group_col])
         # Deskripsi aktivitas tetap dicoba dari metadata eksternal jika tersedia, tanpa mengubah group budget dari Excel utama.
@@ -320,9 +335,21 @@ def process_clean_dataframe(df_raw, col_map, month_range_option, apply_outlier_f
             df["group_budget"] = df["group_budget"].fillna("Lainnya")
             df["bl_desc"] = df["bl_desc"].fillna("-")
         else:
-            # Daftar 17 BL Kegiatan sesuai referensi proyek. BL lain tetap dipertahankan sebagai kategori Lainnya.
-            kegiatan_bls = {36, 37, 38, 39, 40, 49, 54, 55, 56, 61, 62, 68, 69, 74, 78, 80, 154}
-            df["group_budget"] = np.where(df["bl"].isin(kegiatan_bls), "Kegiatan", "Lainnya")
+            # Fallback mapping 5 kategori berdasarkan Dashboard baru.xlsx terbaru.
+            # Dipakai bila file yang dijalankan belum memiliki kolom "Grup budget" / metadata eksternal.
+            group_map = {
+                # SDM
+                **{bl: "SDM" for bl in [5, 6, 7, 8, 9, 10, 11, 12, 41, 42, 43, 44, 45, 46, 47, 48, 50, 51, 52, 53, 90, 91, 92, 93, 146, 148]},
+                # Kegiatan
+                **{bl: "Kegiatan" for bl in [36, 37, 38, 39, 40, 49, 54, 55, 56, 61, 62, 68, 69, 74, 78, 80, 154]},
+                # Aset
+                153: "Aset",
+                # Operasional
+                **{bl: "Operasional" for bl in [19, 20, 34, 60, 70, 140]},
+                # Performance Based
+                **{bl: "Performance Based" for bl in [57, 58, 63, 66, 88, 89, 155]},
+            }
+            df["group_budget"] = df["bl"].map(group_map).fillna("Lainnya")
             df["bl_desc"] = "-"
 
     return df.reset_index(drop=True)
