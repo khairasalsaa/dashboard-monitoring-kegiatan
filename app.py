@@ -634,17 +634,67 @@ def render_interactive_dashboard(df_base):
             hole=0.38,
             title="Proporsi Total Budget per Kategori"
         )
+        # Buat semua kategori tetap terbaca, termasuk kategori dengan proporsi sangat kecil seperti Aset
+        total_budget_pie = df_gb_budget["budget"].sum()
+        df_gb_budget["persen"] = np.where(
+            total_budget_pie > 0,
+            df_gb_budget["budget"] / total_budget_pie * 100,
+            0
+        )
+
+        # Susun custom label: kategori kecil tetap punya label di luar donut
+        custom_text = [
+            f"{row['group_budget']}<br>{row['persen']:.2f}%"
+            for _, row in df_gb_budget.iterrows()
+        ]
+
+        fig_gb_pie = px.pie(
+            df_gb_budget,
+            names="group_budget",
+            values="budget",
+            hole=0.48,
+            title="Proporsi Total Budget per Kategori"
+        )
         fig_gb_pie.update_traces(
-            textposition="inside",
-            textinfo="percent+label",
+            text=custom_text,
+            textinfo="text",
+            textposition="outside",
+            pull=[0.00, 0.00, 0.08, 0.00, 0.00],
+            automargin=True,
             hovertemplate=(
                 "<b>%{label}</b><br>"
                 "Budget: Rp %{value:,.0f}<br>"
                 "Proporsi: %{percent}<extra></extra>"
             )
         )
-        fig_gb_pie.update_layout(height=390, margin=dict(l=20, r=20, t=55, b=20))
+        fig_gb_pie.update_layout(
+            height=460,
+            margin=dict(l=90, r=160, t=65, b=55),
+            uniformtext_minsize=10,
+            uniformtext_mode="show",
+            legend=dict(
+                orientation="v",
+                yanchor="middle",
+                y=0.5,
+                xanchor="left",
+                x=1.02
+            )
+        )
         st.plotly_chart(fig_gb_pie, use_container_width=True)
+
+        # Ringkasan nominal membantu memastikan seluruh 5 kategori terlihat meski slice sangat kecil
+        df_gb_show = df_gb_budget.copy()
+        df_gb_show["Proporsi"] = df_gb_show["persen"]
+        df_gb_show = df_gb_show[["group_budget", "budget", "Proporsi"]]
+        df_gb_show.columns = ["Kategori", "Total Budget (Rp)", "Proporsi"]
+        st.dataframe(
+            df_gb_show.style.format({
+                "Total Budget (Rp)": "Rp {:,.0f}",
+                "Proporsi": "{:.2f}%"
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
 
     st.markdown("<br>", unsafe_allow_html=True)
 
